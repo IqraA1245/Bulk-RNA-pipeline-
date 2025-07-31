@@ -1,0 +1,98 @@
+The purpose of this alignemt pipeline is to automate mapping, counting and gene expression quantification 
+This supports both single and paired end reads 
+This also supports multiple lane samples 
+
+
+# please form your directory structure as such 
+
+bulk_rnaseq_pipeline/
+├── run_bulk_rnaseq_pipeline.sh        # Main launcher script
+├── scripts/                           # SLURM job scripts + helpers
+│   ├── STARIndex_bulk.sl              # STAR genome indexing
+│   ├── STARmap_bulk.sl                # Mapping & gene counting
+│   ├── build_count_matrix.sh          # Matrix builder
+│   └── check_read_length.sh           # (Optional) read length estimator
+├── config/
+│   ├── paths.config                   # Paths to genome, annotation, etc.
+│   └── sample_list.txt                # List of sample IDs
+├── logs/                              # SLURM log output
+└── results/                           # Generated automatically
+    ├── star_index/
+    ├── merged_fastq/
+    ├── aligned_bam/
+    └── counts/
+
+
+
+  #### REQUIREMENTS FOR FASTQ FILES####
+
+Single-End: `<sample>_L00X_cleaned.fq.gz`
+Paired-End: `<sample>_L00X_R1_cleaned.fq.gz` and `<sample>_L00X_R2_cleaned.fq.gz`
+
+
+
+#####OPTIONAL STEP####
+
+# if unsure of your readlength you can check it before beginning indexing 
+
+run:
+bash scripts/check_read_length.sh /path/to/raw_fastq/<sample>_L00X_cleaned.fq.gz
+
+# use the output value to set 
+--sjdbOverhang = <read_length - 1>
+
+
+
+#### add your file paths######
+
+FASTA=/path/to/genome.fa
+GTF=/path/to/gene_annotations.gtf
+DATA_DIR=/path/to/cleaned_fastq_samples
+OUT_DIR=/path/to/results
+
+# make sure to add your samples into the sample list file, one per line
+#make sure to not have any invisible lines
+# you do not need to put the full name of the file 
+  #just the diffrentiating portion 
+  e.g.
+  1_s1
+  2_s2 etc
+#all samples will run in parallel 
+
+#######################run the pipeline#################
+
+bash run_bulk_rnaseq_pipeline.sh -c config/paths.config -s config/sample_list.txt
+
+
+# this will build the STAR index if not there 
+# merge lanes 
+#generare '`gene_counts_unstranded.tsv` in `results/counts/`
+
+
+
+
+other outputs 
+# these will be generated per sample 
+- `aligned_bam/<sample>.Aligned.sortedByCoord.out.bam`
+- `counts/<sample>.ReadsPerGene.out.tab`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+  
