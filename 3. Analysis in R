@@ -1,0 +1,727 @@
+```{r}
+#LOAD PACKAGES
+suppressPackageStartupMessages({
+    library(AnnotationDbi)
+    library(org.Mm.eg.db)
+    library(hgu95av2.db)
+    library(SummarizedExperiment)
+    library(tidyr)
+    library(dplyr)
+    library(ggplot2)
+  library(DESeq2)
+})
+```
+
+
+```{r}
+
+#LOAD DATA + GET RID OF UNNECESSARY COLUMNS
+setwd("file path to data")
+
+
+aged_unprocessed <- read.table(file = 'gene_counts_unstranded_3.tsv', sep = '\t', header = TRUE)
+aged_unprocessed
+
+aged_data <- aged_unprocessed %>% 
+  dplyr::select(gene_id, sample_id_1,sample_id_2 .... etc )
+head(aged_data)
+tail(aged_data)
+```
+
+
+```{r}
+#LOOK AT DIMENSIONS
+counts <- aged_data
+dim(counts)
+counts
+```
+
+
+```{r}
+#GET GENE ANNOATATIONS FROM ENSEMBL
+gene_info <- AnnotationDbi::select(
+  org.Mm.eg.db,
+  keys = counts$gene_id,
+  keytype = "ENSEMBL",
+  columns = c("SYMBOL","GENENAME","ENTREZID")
+)
+
+gene_info
+
+```
+
+```{r}
+#MERGE COUNTS DATA WITH THE GENE ANNOTATIONS 
+counts_annotated <- merge(gene_info,counts, by.x ="ENSEMBL", by.y="gene_id")
+counts_annotated
+
+#GET RID OF ANY N/A SYMBOLS 
+
+counts_annotated <- counts_annotated[!is.na(counts_annotated$ENSEMBL),]
+
+
+counts_annotated <- counts_annotated %>%
+  distinct(SYMBOL, .keep_all = TRUE)
+
+```
+
+```{r}
+#metadata
+
+sample_info <- data.frame(
+  sample_id = c("X1_S1", "X2_S2", "X3_S3","X4_S4", "X9_S5", "X10_S6", "X11_S7", "X12_S8"),
+  condition = c("Control PLF","Control PLF","PEPITEM PLF","PEPITEM PLF","Control Omentum","Control Omentum","PEPITEM Omentum","PEPITEM Omentum"),
+  stringsAsFactors = FALSE
+)
+rownames(sample_info) <- sample_info$sample_id
+
+sample_info
+
+
+```
+```{r}
+#PREPARE COUNT MATRIX
+
+# Create count matrix and handle missing gene symbols
+count_matrix <- counts_annotated %>%
+  filter(!is.na(SYMBOL)) %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  dplyr::select(X1_S1, X2_S2, X3_S3, X4_S4, X9_S5, X10_S6, X11_S7, X12_S8) %>%
+  as.matrix()
+
+# Set row names to gene symbols (after filtering out NAs)
+rownames(count_matrix) <- counts_annotated %>%
+  filter(!is.na(SYMBOL)) %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  pull(SYMBOL)
+count_matrix
+
+```
+
+```{r}
+#CREATING DESEQ2 OBJECT
+
+object <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = sample_info,
+  design = ~ condition
+)
+
+```
+
+
+```{r}
+
+# Pre-filter low count genes
+keep <- rowSums(counts(object)) >= 10
+object <- object[keep,]
+
+# Check data
+object
+
+
+```
+```{r}
+#run deseq2 analysis
+
+#differential expression analysis 
+
+deg <- DESeq(object)
+
+#results
+
+deg_res <- results(deg)
+summary(deg_res)
+
+```
+```{r}
+#deg -significance
+
+res_sig <- subset(deg_res,padj <0.05 & abs(log2FoldChange)>1)
+
+#convert into data frame + add in gene annotation 
+
+deg_df <- as.data.frame(res_sig)
+deg_df$gene <- rownames(deg_df) 
+
+deg_df
+
+```
+
+
+
+
+```{r}
+#   create meta data 
+sample_info_detailed <- data.frame(
+  sample_id = c("X1_S1", "X2_S2", "X3_S3", "X4_S4", "X9_S5", "X10_S6", "X11_S7", "X12_S8"),
+  treatment = c("Control", "Control", "PEPITEM", "PEPITEM", "Control", "Control", "PEPITEM", "PEPITEM"),
+  tissue = c("PLF", "PLF", "PLF", "PLF", "Omentum", "Omentum", "Omentum", "Omentum"),
+  stringsAsFactors = FALSE
+)
+rownames(sample_info_detailed) <- sample_info_detailed$sample_id
+
+# Create a combined factor for easier contrasts
+sample_info_detailed$group <- paste(sample_info_detailed$treatment, sample_info_detailed$tissue, sep = "_")
+
+print(sample_info_detailed)
+```
+
+```{r}
+# Create new DESeq2 object with detailed design
+dds_detailed <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = sample_info_detailed,
+  design = ~ group
+)
+
+# Pre-filter
+keep <- rowSums(counts(dds_detailed)) >= 10
+dds_detailed <- dds_detailed[keep,]
+
+# Run DESeq2
+dds_detailed <- DESeq(dds_detailed)
+```
+
+
+
+```{r}
+# PEPITEM vs Control in PLF tissue
+res_PLF <- results(dds_detailed, contrast = c("group", "PEPITEM_PLF", "Control_PLF"))
+summary(res_PLF)
+
+# PEPITEM vs Control in Omentum tissue
+res_Omentum <- results(dds_detailed, contrast = c("group", "PEPITEM_Omentum", "Control_Omentum"))
+summary(res_Omentum)
+```
+
+```{r}
+# Significant genes in PLF
+sig_PLF <- subset(as.data.frame(res_PLF), padj < 0.05 & abs(log2FoldChange) > 1)
+sig_PLF$gene <- rownames(sig_PLF)
+sig_PLF$tissue <- "PLF"
+
+# Significant genes in Omentum
+sig_Omentum <- subset(as.data.frame(res_Omentum), padj < 0.05 & abs(log2FoldChange) > 1)
+sig_Omentum$gene <- rownames(sig_Omentum)
+sig_Omentum$tissue <- "Omentum"
+
+# Summary
+cat("Significant genes in PLF:", nrow(sig_PLF), "\n")
+cat("Significant genes in Omentum:", nrow(sig_Omentum), "\n")
+
+# View top genes
+head(sig_PLF[order(sig_PLF$padj),])
+head(sig_Omentum[order(sig_Omentum$padj),])
+```
+
+
+
+```{r}
+
+library(ggplot2)
+library(ggrepel)
+
+# Prepare PLF data
+res_PLF_df <- as.data.frame(res_PLF)
+res_PLF_df$gene <- rownames(res_PLF_df)
+res_PLF_df <- res_PLF_df[!is.na(res_PLF_df$padj),]
+
+# Add significance categories
+res_PLF_df$significance <- "Not Significant"
+res_PLF_df$significance[res_PLF_df$padj < 0.05 & res_PLF_df$log2FoldChange > 1] <- "Upregulated"
+res_PLF_df$significance[res_PLF_df$padj < 0.05 & res_PLF_df$log2FoldChange < -1] <- "Downregulated"
+
+# If no significant genes, try more lenient criteria
+if(sum(res_PLF_df$significance != "Not Significant") == 0) {
+  res_PLF_df$significance[res_PLF_df$padj < 0.1 & res_PLF_df$log2FoldChange > 0.5] <- "Upregulated"
+  res_PLF_df$significance[res_PLF_df$padj < 0.1 & res_PLF_df$log2FoldChange < -0.5] <- "Downregulated"
+}
+
+# Get top genes to label (top 8 most significant)
+genes_to_label_PLF <- res_PLF_df[res_PLF_df$significance != "Not Significant",]
+if(nrow(genes_to_label_PLF) > 0) {
+  genes_to_label_PLF <- genes_to_label_PLF[order(genes_to_label_PLF$padj),]
+  genes_to_label_PLF <- head(genes_to_label_PLF, 8)
+} else {
+  # If still no significant genes, just take top 5 by p-value
+  genes_to_label_PLF <- res_PLF_df[order(res_PLF_df$padj),]
+  genes_to_label_PLF <- head(genes_to_label_PLF, 5)
+}
+
+
+## right before you make volcano_PLF, add:
+n_up   <- sum(res_PLF_df$significance == "Upregulated",   na.rm = TRUE)
+n_down <- sum(res_PLF_df$significance == "Downregulated", na.rm = TRUE)
+
+## Then in your ggplot pipeline, replace your existing annotate() with something like this:
+volcano_PLF <- ggplot(res_PLF_df, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = significance), alpha = 0.6, size = 1.2) +
+  scale_color_manual(values = c(
+    "Upregulated"   = "#E31A1C",
+    "Downregulated" = "#1F78B4",
+    "Not Significant" = "grey70"
+  )) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", alpha = 0.7) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.7) +
+  ggrepel::geom_text_repel(
+    data        = genes_to_label_PLF,
+    aes(label   = gene),
+    size        = 3,
+    box.padding = 2,
+    point.padding = 1,
+    segment.color = "grey40",
+    segment.size  = 0.4,
+    color       = "black",
+    fontface    = "bold",
+    force       = 10,
+    max.iter    = 50000
+  ) +
+  labs(
+    title = "PEPITEM vs Control in PLF Macrophages",
+    x     = "Log₂ Fold Change (PEPITEM vs Control)",
+    y     = "-Log₁₀ Adjusted P-value",
+    color = "Regulation"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(hjust = 0.5, size = 14, face = "bold"),
+    panel.grid.minor  = element_blank(),
+    legend.position   = "top",
+    plot.margin       = margin(20, 20, 20, 20)
+  ) +
+  annotate(
+    "text",
+    x      = -Inf, y =  Inf,         
+    hjust  = -0.1, vjust =  1.1,
+    label  = paste0(
+      "↑ Up:   ",    n_up,   " genes\n",
+      "↓ Down: ",    n_down, " genes"
+    ),
+    size      = 4,
+    fontface  = "bold"
+  )
+
+
+
+
+
+print(volcano_PLF)
+
+
+ggsave("volcano_PLF_annotated.png", volcano_PLF, 
+       width = 10, height = 8, dpi = 300, bg = "white")
+
+```
+# Create PLF volcano plot
+volcano_PLF <- ggplot(res_PLF_df, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = significance), alpha = 0.6, size = 1.2) +
+  scale_color_manual(values = c("Upregulated" = "#E31A1C", 
+                               "Downregulated" = "#1F78B4", 
+                               "Not Significant" = "grey70")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", alpha = 0.7, color = "black") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.7, color = "black") +
+  geom_text_repel(data = genes_to_label_PLF,
+                  aes(label = gene),
+                  size = 3,
+                  box.padding = 2,
+                  point.padding = 1,
+                  max.overlaps = Inf,
+                  min.segment.length = 0,
+                  segment.color = "grey40",
+                  segment.size = 0.4,
+                  color = "black",
+                  fontface = "bold",
+                  force = 10,
+                  max.time = 30,
+                  max.iter = 50000) +
+  labs(title = "PEPITEM vs Control in PLF Macrophages",
+       x = "Log2 Fold Change (PEPITEM vs Control)",
+       y = "-Log10 Adjusted P-value",
+       color = "Regulation") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        panel.grid.minor = element_blank(),
+        legend.position = "top",
+        plot.margin = margin(20, 20, 20, 20)) +
+  annotate("text", 
+           x = Inf, y = Inf, 
+           label = paste0("↑ ", sum(res_PLF_df$significance == "Upregulated"), " genes\n",
+                         "↓ ", sum(res_PLF_df$significance == "Downregulated"), " genes"),
+           hjust = 1.1, vjust = 15.0,
+           size = 3.5,
+           color = "black",
+           fontface = "bold")
+
+print(volcano_PLF)
+
+#ggsave("volcano_PLF_annotated.png", volcano_PLF, 
+ #      width = 10, height = 8, dpi = 300, bg = "white")
+
+
+
+
+
+
+
+
+
+```{r}
+## Prepare Omentum data
+res_Omentum_df <- as.data.frame(res_Omentum)
+res_Omentum_df$gene <- rownames(res_Omentum_df)
+res_Omentum_df <- res_Omentum_df[!is.na(res_Omentum_df$padj), ]
+
+# Add significance categories
+res_Omentum_df$significance <- "Not Significant"
+res_Omentum_df$significance[
+  res_Omentum_df$padj  < 0.05 & res_Omentum_df$log2FoldChange >  1
+] <- "Upregulated"
+res_Omentum_df$significance[
+  res_Omentum_df$padj  < 0.05 & res_Omentum_df$log2FoldChange < -1
+] <- "Downregulated"
+
+# If no significant genes, relax thresholds (your existing code)...
+
+# Get top genes to label
+genes_to_label_Omentum <- res_Omentum_df[res_Omentum_df$significance != "Not Significant", ]
+if (nrow(genes_to_label_Omentum) > 0) {
+  genes_to_label_Omentum <- genes_to_label_Omentum[
+    order(genes_to_label_Omentum$padj), 
+  ]
+  genes_to_label_Omentum <- head(genes_to_label_Omentum, 8)
+} else {
+  genes_to_label_Omentum <- head(
+    res_Omentum_df[order(res_Omentum_df$padj), ],
+    5
+  )
+}
+
+# ----- NEW: count up/down genes -----
+n_up_Omentum   <- sum(res_Omentum_df$significance == "Upregulated",   na.rm = TRUE)
+n_down_Omentum <- sum(res_Omentum_df$significance == "Downregulated", na.rm = TRUE)
+
+# Create Omentum volcano plot
+volcano_Omentum <- ggplot(res_Omentum_df, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = significance), alpha = 0.6, size = 1.2) +
+  scale_color_manual(values = c(
+    "Upregulated"     = "#E31A1C",
+    "Downregulated"   = "#1F78B4",
+    "Not Significant" = "grey70"
+  )) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", alpha = 0.7) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.7) +
+  ggrepel::geom_text_repel(
+    data        = genes_to_label_Omentum,
+    aes(label   = gene),
+    size        = 3,
+    box.padding = 2,
+    point.padding = 1,
+    segment.color = "grey40",
+    segment.size  = 0.4,
+    color       = "black",
+    fontface    = "bold",
+    force       = 10,
+    max.iter    = 50000
+  ) +
+  labs(
+    title = "PEPITEM vs Control in Omentum Macrophages",
+    x     = "Log₂ Fold Change (PEPITEM vs Control)",
+    y     = "-Log₁₀ Adjusted P-value",
+    color = "Regulation"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title      = element_text(hjust = 0.5, size = 14, face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position  = "top",
+    plot.margin      = margin(20, 20, 20, 20)
+  ) +
+  annotate(
+    "text",
+    x      = -Inf, y =  Inf,              
+    hjust  = -0.1, vjust =  3.5,
+    label  = paste0(
+      "↑ Up:   ",    n_up_Omentum,   " genes\n",
+      "↓ Down: ",    n_down_Omentum, " genes"
+    ),
+    size     = 4,
+    fontface = "bold",
+    color    = "black"
+  )
+
+print(volcano_Omentum)
+
+ggsave("volcano_Omentum_annotated.png", volcano_Omentum, 
+      width = 10, height = 8, dpi = 300, bg = "white")
+ 
+```
+
+
+
+
+```{r}
+# Transform data for PCA 
+vsd <- vst(dds_detailed, blind = FALSE)
+
+# Create PCA data
+pcaData <- DESeq2::plotPCA(vsd, 
+                          intgroup = c("treatment", "tissue"), 
+                          returnData = TRUE)
+
+#percentage variance 
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# Create PCA plot
+pca_plot <- ggplot(pcaData, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = treatment, shape = tissue), size = 5) +
+  theme_minimal() +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed() +
+  scale_color_manual(values = c("Control" = "blue", "PEPITEM" = "red")) +
+  scale_shape_manual(values = c("PLF" = 16, "Omentum" = 17)) +
+  labs(title = "PCA of PEPITEM vs Control Samples",
+       color = "Treatment",
+       shape = "Tissue") +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        legend.position = "right")
+
+print(pca_plot)
+
+
+#ggsave("3.ctrl vs pepitem PCA.png", pca_plot, 
+      # width = 7, height = 5, dpi = 300, bg = "white")
+```
+
+
+
+
+```{r}
+# Add sample labels to the plot
+pca_plot_labeled <- ggplot(pcaData, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = treatment, shape = tissue), size = 5) +
+  geom_text_repel(aes(label = name), 
+                  size = 3, 
+                  box.padding = 0.5,
+                  point.padding = 0.3) +
+  theme_minimal() +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed() +
+  scale_color_manual(values = c("Control" = "#1F78B4", "PEPITEM" = "#E31A1C")) +
+  scale_shape_manual(values = c("PLF" = 16, "Omentum" = 17)) +
+  labs(title = "PCA of PEPITEM vs Control Samples",
+       subtitle = "Samples colored by treatment, shaped by tissue",
+       color = "Treatment",
+       shape = "Tissue") +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 12),
+        legend.position = "right",
+        panel.grid.minor = element_blank())
+
+print(pca_plot_labeled)
+```
+
+
+
+```{r}
+library(dplyr)
+library(pheatmap)
+
+# 1. Pick the strongest DEGs (if you haven't already)
+top_n      <- 10
+top_PLF    <- sig_PLF     %>% arrange(padj) %>% slice_head(n = top_n) %>% pull(gene)
+top_Omentum<- sig_Omentum %>% arrange(padj) %>% slice_head(n = top_n) %>% pull(gene)
+genes_use  <- unique(c(top_PLF, top_Omentum))
+
+# 2. Build the expression matrix (vst‐scaled)
+expr_mat <- assay(vsd)[genes_use, ]
+expr_mat <- t(scale(t(expr_mat)))   # row‐wise z‐score
+
+# 3. Build column annotations
+anno_col <- data.frame(
+  Tissue    = colData(vsd)$tissue,
+  Treatment = colData(vsd)$treatment
+)
+rownames(anno_col) <- colnames(expr_mat)
+
+# 4. Build row annotations
+anno_row <- data.frame(
+  Direction = ifelse(rownames(expr_mat) %in% top_PLF, "PLF_up", "Omentum_up")
+)
+rownames(anno_row) <- rownames(expr_mat)
+
+# 5. Split out PLF vs Omentum
+is_PLF     <- anno_col$Tissue == "PLF"
+is_Omentum <- anno_col$Tissue == "Omentum"
+
+expr_PLF     <- expr_mat[, is_PLF]
+anno_PLF     <- anno_col[is_PLF, , drop = FALSE]
+
+expr_Omentum <- expr_mat[, is_Omentum]
+anno_Omentum <- anno_col[is_Omentum, , drop = FALSE]
+
+# 6A. Heat-map for PLF samples, with gene names and no Direction bar
+plf_heat <- pheatmap(
+  expr_PLF,
+  annotation_col = anno_PLF,
+  cluster_rows   = TRUE,
+  cluster_cols   = FALSE,
+  show_rownames  = TRUE,        # ← show gene names
+  show_colnames  = FALSE,       # usually hide sample names
+  annotation_row = NULL,        # ← drop the Direction legend
+  fontsize_row   = 10,           # tweak to fit your labels
+  fontsize_col   = 8,
+  main           = "Top DEGs – PLF Macrophages"
+)
+
+# 6B. Heat-map for Omentum samples, with gene names
+oment_heat <- pheatmap(
+  expr_Omentum,
+  annotation_col = anno_Omentum,
+  cluster_rows   = TRUE,
+  cluster_cols   = FALSE,
+  show_rownames  = TRUE,
+  show_colnames  = FALSE,
+  annotation_row = NULL,
+  fontsize_row   = 10,
+  fontsize_col   = 8,
+  main           = "Top DEGs – Omental Macrophages"
+)
+
+ggsave("heatmap_final_Omentum_annotated.png", oment_heat, 
+      width = 10, height = 8, dpi = 300, bg = "white")
+ggsave("heatmap_final_PLF_annotated.png", plf_heat, 
+      width = 10, height = 8, dpi = 300, bg = "white")
+
+```
+
+
+```{r}
+## GO enrichment for PLF DEGs
+
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(dplyr)
+library(ggplot2)
+# 1. Select significant PLF genes
+sig_PLF <- res_PLF_df %>%
+  filter(padj < 0.05, abs(log2FoldChange) > 1)
+
+up_genes   <- sig_PLF %>% filter(log2FoldChange >  0) %>% pull(gene)
+down_genes <- sig_PLF %>% filter(log2FoldChange <  0) %>% pull(gene)
+
+# 2. Map SYMBOL → ENTREZID
+entrez_up   <- bitr(up_genes,
+                    fromType   = "SYMBOL",
+                    toType     = "ENTREZID",
+                    OrgDb      = org.Mm.eg.db)$ENTREZID
+
+entrez_down <- bitr(down_genes,
+                    fromType   = "SYMBOL",
+                    toType     = "ENTREZID",
+                    OrgDb      = org.Mm.eg.db)$ENTREZID
+
+#entrez ID lists 
+gene_list <- list(
+  Up        = entrez_up,
+  Down      = entrez_down
+)
+
+
+ego_cc <- compareCluster(
+  geneCluster     = gene_list,
+  fun             = "enrichGO",
+  OrgDb           = org.Mm.eg.db,
+  keyType         = "ENTREZID",
+  ont             = "BP",
+  pAdjustMethod   = "BH",
+  pvalueCutoff    = 0.05,
+  qvalueCutoff    = 0.10,
+  readable        = TRUE
+)
+
+
+dotplot(
+  ego_cc,
+  showCategory = 10,                 
+  title        = "PLF Macrophages GO BP Enrichment",
+  font.size    = 12
+) +
+  scale_color_manual(
+    values = c("Up" = "#E31A1C", "Down" = "#1F78B4")
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title     = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+
+
+```
+
+
+
+
+
+
+
+```{r}
+## GO enrichment for PLF DEGs
+
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(dplyr)
+library(ggplot2)
+# 1. Select significant PLF genes
+sig_PLF <- res_PLF_df %>%
+  filter(padj < 0.05, abs(log2FoldChange) > 1)
+
+up_genes   <- sig_Omentum %>% filter(log2FoldChange >  0) %>% pull(gene)
+down_genes <- sig_Omentum %>% filter(log2FoldChange <  0) %>% pull(gene)
+
+#  ENTREZID
+entrez_up   <- bitr(up_genes,
+                    fromType   = "SYMBOL",
+                    toType     = "ENTREZID",
+                    OrgDb      = org.Mm.eg.db)$ENTREZID
+
+entrez_down <- bitr(down_genes,
+                    fromType   = "SYMBOL",
+                    toType     = "ENTREZID",
+                    OrgDb      = org.Mm.eg.db)$ENTREZID
+gene_list <- list(
+  Up        = entrez_up,
+  Down      = entrez_down
+)
+
+ego_cc <- compareCluster(
+  geneCluster     = gene_list,
+  fun             = "enrichGO",
+  OrgDb           = org.Mm.eg.db,
+  keyType         = "ENTREZID",
+  ont             = "BP",
+  pAdjustMethod   = "BH",
+  pvalueCutoff    = 0.05,
+  qvalueCutoff    = 0.10,
+  readable        = TRUE
+)
+
+dotplot(
+  ego_cc,
+  showCategory = 10,                 # top 10 pathways per group
+  title        = "Omental Macrophages GO BP Enrichment",
+  font.size    = 12
+) +
+  scale_color_manual(
+    values = c("Up" = "#E31A1C", "Down" = "#1F78B4")
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title     = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+
+
+```
