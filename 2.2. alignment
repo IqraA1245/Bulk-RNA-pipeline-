@@ -1,0 +1,313 @@
+EACH OF THE FOLLOWING SECTION IS A SEPERATE FILE
+# MAKE SURE TO NAME AND RUN ACCORDING TO THE INSTRUCTIONS 
+
+
+######################### check_read_length.sh ####################################
+
+#!/bin/bash
+
+# Usage: ./check_read_length.sh /path/to/fastq.gz
+
+if [[ $# -ne 1 ]]; then
+  echo "Usage: $0 <fastq.gz file>"
+  exit 1
+fi
+
+FILE=$1
+
+if [[ ! -f "$FILE" ]]; then
+  echo "ERROR: File not found: $FILE"
+  exit 1
+fi
+
+# Extract the first read sequence and measure its length
+READ_LEN=$(zcat "$FILE" | awk 'NR==2 { print length($0); exit }')
+
+echo "Detected read length: $READ_LEN"
+echo "Recommended --sjdbOverhang: $((READ_LEN - 1))"
+
+
+####################### paths.config #####################################
+FASTA=/path/to/genome.fa
+GTF=/path/to/genome.gtf
+DATA_DIR=/pathw/to/fastq
+OUT_DIR=/path/to dir
+
+
+
+####################### STARmap_bulk.sl ##########################
+
+#!/bin/bash
+#SBATCH --job-name=MAP          # Job name
+#SBATCH --output=logs/star_%x_%j.out     # Job output file
+#SBATCH --error=logs/star_%x_%j.err       #Job error output
+#SBATCH --time=10:15:0
+#SBATCH --nodes=1
+#SBATCH --ntasks=16
+#SBATCH --mem=128G
+
+
+module purge
+module load bluebear
+module load bear-apps/2022b
+module load  bear-apps/2022b/live
+module load STAR/2.7.11a-GCC-12.2.0
+
+# Sanity check
+command -v STAR || { echo "ERROR: STAR not found in PATH"; exit 1; }
+
+SAMPLE=$1
+DATA_DIR=$2
+OUT_DIR=$3
+
+MERGED_DIR="${OUT_DIR}/merged_fastq"
+STAR_DIR="${OUT_DIR}/aligned_bam"
+COUNT_DIR="${OUT_DIR}/counts"
+INDEX_DIR="${OUT_DIR}/star_index"
+
+mkdir -p "$MERGED_DIR"
+
+# Detect if PE or SE by checking for R1/R2 presence
+R1_FILES=(${DATA_DIR}/${SAMPLE}_L00*_R1_cleaned.fq.gz)
+if [[ -f "${R1_FILES[0]}" ]]; then
+  # Paired-end
+  echo "Detected paired-end reads for ${SAMPLE}"
+  R2_FILES=(${DATA_DIR}/${SAMPLE}_L00*_R2_cleaned.fq.gz)
+  MERGED_R1="${MERGED_DIR}/${SAMPLE}_R1.fq.gz"
+  MERGED_R2="${MERGED_DIR}/${SAMPLE}_R2.fq.gz"
+  [[ ! -f "$MERGED_R1" ]] && cat "${R1_FILES[@]}" > "$MERGED_R1"
+  [[ ! -f "$MERGED_R2" ]] && cat "${R2_FILES[@]}" > "$MERGED_R2"
+
+  STAR --runThreadN 16 \
+    --genomeDir "$INDEX_DIR" \
+    --readFilesIn "$MERGED_R1" "$MERGED_R2" \
+    --readFilesCommand zcat \
+    --outFileNamePrefix "${STAR_DIR}/${SAMPLE}." \
+    --outSAMtype BAM SortedByCoordinate \
+    --quantMode GeneCounts
+else
+  # Single-end
+  echo "Detected single-end reads for ${SAMPLE}"
+  MERGED_SE="${MERGED_DIR}/${SAMPLE}.fq.gz"
+  [[ ! -f "$MERGED_SE" ]] && cat ${DATA_DIR}/${SAMPLE}_L00*_cleaned.fq.gz > "$MERGED_SE"
+
+  STAR --runThreadN 16 \
+    --genomeDir "$INDEX_DIR" \
+    --readFilesIn "$MERGED_SE" \
+    --readFilesCommand zcat \
+    --outFileNamePrefix "${STAR_DIR}/${SAMPLE}." \
+    --outSAMtype BAM SortedByCoordinate \
+    --outStd Log \
+    --outSAMattributes All \
+    --quantMode GeneCounts
+ 
+  echo "STAR exit code: $?"
+LOGFILE="${STAR_DIR}/${SAMPLE}Log.out"
+[[ -f "$LOGFILE" ]] && {
+  echo "==== STAR Log ===="
+  tail -n 50 "$LOGFILE"
+}
+
+fi
+
+# Copy counts
+cp "${STAR_DIR}/${SAMPLE}.ReadsPerGene.out.tab" "${COUNT_DIR}/${SAMPLE}.ReadsPerGene.out.tab"
+
+
+
+
+
+######################## STARIndex_bulk.sl ###################################
+
+#!/bin/bash
+#SBATCH --job-name=STARIdx          # Job name
+#SBATCH --output=logs/star_index_%j.out     # Job output file
+#SBATCH --error=logs/star_index_%j.err       #Job error output
+#SBATCH --time=10:15:0
+#SBATCH --ntasks=12
+#SBATCH --mem=64G
+
+FASTA=$1
+GTF=$2
+INDEX_DIR=$3
+
+module purge
+module load bluebear
+module load bear-apps/2022b
+module load STAR/2.7.11a-GCC-12.2.0
+
+
+mkdir -p "$INDEX_DIR"
+
+STAR --runMode genomeGenerate \
+  --genomeDir "$INDEX_DIR" \
+  --genomeFastaFiles "$FASTA" \
+  --sjdbGTFfile "$GTF" \
+  --sjdbOverhang 75 \
+  --runThreadN 8
+
+
+
+
+################################ Build counts matrix#########################
+#!/bin/bash
+
+set -euo pipefail
+
+COUNT_DIR=$1
+OUTPUT_FILE=$2
+
+echo "Building unstranded gene count matrix from STAR output in: $COUNT_DIR"
+echo "Output will be written to: $OUTPUT_FILE"
+
+# Get sample base names
+FILES=(${COUNT_DIR}/*.ReadsPerGene.out.tab)
+SAMPLES=($(basename -a "${FILES[@]}" | sed 's/.ReadsPerGene.out.tab//'))
+
+# Extract gene IDs from first file (excluding N_ rows)
+grep -vE '^N_' "${FILES[0]}" | cut -f 1 > "$OUTPUT_FILE"
+
+# Extract column 2 (unstranded counts) for each sample
+TMP_FILES=()
+for FILE in "${FILES[@]}"; do
+  SAMPLE=$(basename "$FILE" .ReadsPerGene.out.tab)
+  TMP_FILE="${COUNT_DIR}/${SAMPLE}.tmp"
+  grep -vE '^N_' "$FILE" | cut -f 2 > "$TMP_FILE"
+  TMP_FILES+=("$TMP_FILE")
+done
+
+# Combine all into final matrix
+paste "$OUTPUT_FILE" "${TMP_FILES[@]}" > "${OUTPUT_FILE}.tmp"
+mv "${OUTPUT_FILE}.tmp" "$OUTPUT_FILE"
+
+# Add header row
+HEADER="gene_id"
+for SAMPLE in "${SAMPLES[@]}"; do
+  HEADER="${HEADER}\t${SAMPLE}"
+done
+sed -i "1s/^/${HEADER}\n/" "$OUTPUT_FILE"
+
+# Cleanup
+rm "${TMP_FILES[@]}"
+echo "Done! Count matrix written to $OUTPUT_FILE"
+
+
+
+
+
+
+
+################### run bulk rna seq pipeline ##############################
+#!/bin/bash
+
+set -euo pipefail
+
+# Help Menu
+usage() {
+  echo "Usage: $0 -c config_file -s sample_list"
+  echo ""
+  echo "Options:"
+  echo "  -c    Path to config file (e.g., paths.config)"
+  echo "  -s    Path to sample list file (e.g., sample_list.txt)"
+  echo "  -h    Show this help message"
+  echo ""
+  echo "The config file must define:"
+  echo "  FASTA=...        # Reference genome FASTA"
+  echo "  GTF=...          # Gene annotation GTF"
+  echo "  DATA_DIR=...     # Directory with raw FASTQs"
+  echo "  OUT_DIR=...      # Output directory root"
+  exit 1
+}
+
+# Parse arguments
+while getopts "c:s:h" opt; do
+  case $opt in
+    c) CONFIG=$OPTARG ;;
+    s) SAMPLE_LIST=$OPTARG ;;
+    h) usage ;;
+    *) usage ;;
+  esac
+done
+
+# Validate inputs
+if [[ -z "${CONFIG:-}" || -z "${SAMPLE_LIST:-}" ]]; then
+  usage
+fi
+
+if [[ ! -f "$CONFIG" ]]; then
+  echo "ERROR: Config file not found: $CONFIG"
+  exit 1
+fi
+
+if [[ ! -f "$SAMPLE_LIST" ]]; then
+  echo "ERROR: Sample list not found: $SAMPLE_LIST"
+  exit 1
+fi
+
+# Load config
+source "$CONFIG"
+
+# Validate required config variables
+for var in FASTA GTF DATA_DIR OUT_DIR; do
+  if [[ -z "${!var:-}" ]]; then
+    echo "ERROR: $var is not set in config."
+    exit 1
+  fi
+done
+
+# Check paths
+[[ ! -f "$FASTA" ]] && echo "ERROR: FASTA file not found." && exit 1
+[[ ! -f "$GTF" ]] && echo "ERROR: GTF file not found." && exit 1
+[[ ! -d "$DATA_DIR" ]] && echo "ERROR: DATA_DIR not found." && exit 1
+mkdir -p "$OUT_DIR"/{merged_fastq,aligned_bam,counts,star_index}
+mkdir -p logs
+
+# Build STAR index if missing
+if [[ ! -f "${OUT_DIR}/star_index/Genome" ]]; then
+  echo "Submitting STAR index job..."
+  sbatch scripts/STARIndex_bulk.sl "$FASTA" "$GTF" "${OUT_DIR}/star_index"
+  echo "STAR index job submitted. Please re-run this pipeline after the index is built."
+  exit 0
+fi
+
+# Read samples
+mapfile -t SAMPLES < "$SAMPLE_LIST"
+echo "Found ${#SAMPLES[@]} samples in list."
+
+# Submit mapping/counting job per sample
+for SAMPLE in "${SAMPLES[@]}"; do
+  echo "Submitting STAR mapping job for: $SAMPLE"
+  sbatch scripts/STARmap_bulk.sl "$SAMPLE" "$DATA_DIR" "$OUT_DIR"
+done
+
+
+####
+# Wait until all jobs with the same name have completed
+echo "Waiting for all STAR jobs to finish..."
+
+while true; do
+    cmd=$(squeue -u "$USER" 2> /dev/null)
+    if [[ "$cmd" =~ "MAP" ]]; then
+        echo "Waiting for STAR mapping jobs to finish..."
+        sleep 30
+    else
+        echo "All STAR mapping jobs finished."
+        break
+    fi
+done
+
+echo "All STAR jobs finished. Building count matrix..."
+bash scripts/build_count_matrix.sh "${OUT_DIR}/counts" "${OUT_DIR}/counts/gene_counts_unstranded.tsv"
+
+
+
+
+
+
+
+
+
+
+
+
+
